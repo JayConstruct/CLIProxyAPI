@@ -83,10 +83,24 @@ func decodeZstdRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
 	if maxBytes > 0 && maxBytes < math.MaxInt64 {
 		reader = io.LimitReader(decoder, maxBytes+1)
 	}
-	decoded, err := io.ReadAll(reader)
-	if err != nil {
+	// A valid first frame may advertise its decompressed size. Use that
+	// size only as a bounded allocation hint, never as a correctness or
+	// security check: the streaming decoder and size limit remain authoritative.
+	const maxInitialCapacity = 64 << 20
+	var output bytes.Buffer
+	var header zstd.Header
+	if header.Decode(raw) == nil && header.HasFCS {
+		size := header.FrameContentSize
+		if size > 0 && size <= maxInitialCapacity &&
+			size <= uint64(len(raw))*256 &&
+			(maxBytes <= 0 || size <= uint64(maxBytes)) {
+			output.Grow(int(size))
+		}
+	}
+	if _, err := io.Copy(&output, reader); err != nil {
 		return nil, fmt.Errorf("failed to decode zstd request body: %w", err)
 	}
+	decoded := output.Bytes()
 	if maxBytes > 0 && int64(len(decoded)) > maxBytes {
 		return nil, &http.MaxBytesError{Limit: maxBytes}
 	}
