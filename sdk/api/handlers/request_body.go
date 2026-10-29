@@ -73,7 +73,9 @@ func decodeRequestBody(raw []byte, encoding string, maxBytes int64) ([]byte, err
 }
 
 func decodeZstdRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
-	decoder, err := zstd.NewReader(bytes.NewReader(raw))
+	// Each HTTP request already runs independently. Synchronous decoding avoids
+	// additional in-flight blocks and goroutines for every compressed request.
+	decoder, err := zstd.NewReader(bytes.NewReader(raw), zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zstd request decoder: %w", err)
 	}

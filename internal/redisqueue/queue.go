@@ -217,6 +217,7 @@ func (q *queue) popOldest(count int) [][]byte {
 	for i := 0; i < count; i++ {
 		item := q.items[q.head+i]
 		out = append(out, item.payload)
+		q.items[q.head+i] = queueItem{}
 	}
 	q.head += count
 	q.maybeCompactLocked()
@@ -236,6 +237,7 @@ func (q *queue) pruneLocked(now time.Time) {
 	}
 	cutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
 	for q.head < len(q.items) && q.items[q.head].enqueuedAt.Before(cutoff) {
+		q.items[q.head] = queueItem{}
 		q.head++
 	}
 }
