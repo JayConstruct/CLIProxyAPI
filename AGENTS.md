@@ -5,6 +5,10 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Fork release preference
+- For future releases of `JayConstruct/CLIProxyAPI`, build only Linux amd64 by default for fast server testing.
+- Publish the standard `linux_amd64.tar.gz` archive with SHA-256 checksums. Build additional platforms or variants only when the user explicitly requests them.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)
