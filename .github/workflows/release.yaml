@@ -33,7 +33,15 @@ jobs:
           updated_notes_file="$(mktemp)"
           trap 'rm -f "$release_notes_file" "$generated_notes_file" "$changelog_entries_file" "$changelog_notes_file" "$updated_notes_file"' EXIT
 
-          cat > "$release_notes_file" <<'EOF'
+          if [[ "$GITHUB_REPOSITORY" == "JayConstruct/CLIProxyAPI" ]]; then
+            cat > "$release_notes_file" <<'EOF'
+          ## Linux amd64 release assets
+
+          - `CLIProxyAPI_<version>_linux_amd64.tar.gz` supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
+          - `checksums.txt` contains the SHA-256 checksum for the archive.
+          EOF
+          else
+            cat > "$release_notes_file" <<'EOF'
           <!-- cliproxyapi-linux-release-assets:start -->
           ## Linux release assets
 
@@ -46,6 +54,7 @@ jobs:
 
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
+          fi
 
           git fetch --force --tags
           previous_tag=""
@@ -92,6 +101,7 @@ jobs:
           fi
 
   build-hosted:
+    if: github.repository != 'JayConstruct/CLIProxyAPI'
     name: build ${{ matrix.target }}
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
@@ -235,21 +245,11 @@ jobs:
   build-linux-glibc:
     name: build linux-${{ matrix.goarch }} glibc
     needs: prepare-release
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.goarch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: linux-amd64
-            runner: ubuntu-latest
-            goarch: amd64
-            asset_arch: amd64
-            manylinux_image: quay.io/pypa/manylinux2014_x86_64
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            goarch: arm64
-            asset_arch: aarch64
-            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+        goarch: ${{ fromJSON(github.repository == 'JayConstruct/CLIProxyAPI' && '["amd64"]' || '["amd64", "arm64"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -274,10 +274,10 @@ jobs:
       - name: Build archive
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: linux-${{ matrix.goarch }}
           GOARCH: ${{ matrix.goarch }}
-          ASSET_ARCH: ${{ matrix.asset_arch }}
-          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+          ASSET_ARCH: ${{ matrix.goarch == 'arm64' && 'aarch64' || 'amd64' }}
+          MANYLINUX_IMAGE: quay.io/pypa/manylinux2014_${{ matrix.goarch == 'arm64' && 'aarch64' || 'x86_64' }}
         run: |
           set -euo pipefail
 
@@ -321,7 +321,7 @@ jobs:
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: linux-${{ matrix.goarch }}
           path: dist/CLIProxyAPI_*
           if-no-files-found: error
       - name: Upload release assets
@@ -369,6 +369,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
 
   build-linux-no-plugin:
+    if: github.repository != 'JayConstruct/CLIProxyAPI'
     name: build linux-${{ matrix.goarch }} no-plugin
     needs: prepare-release
     runs-on: ubuntu-latest
@@ -488,6 +489,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
 
   build-freebsd:
+    if: github.repository != 'JayConstruct/CLIProxyAPI'
     name: build ${{ matrix.target }}
     needs: prepare-release
     runs-on: ubuntu-latest
