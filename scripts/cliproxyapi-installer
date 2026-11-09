@@ -499,6 +499,29 @@ get_current_asset_variant() {
     fi
 }
 
+# Record source information separately so official version files stay compatible.
+get_current_source() {
+    local metadata="${INSTALL_DIR}/release-source.txt"
+    local source version variant expected_hash actual_hash
+    if [[ ! -f "$metadata" || ! -f "${INSTALL_DIR}/cli-proxy-api" ]]; then
+        echo "unknown"
+        return
+    fi
+    IFS='|' read -r source version variant expected_hash < "$metadata" || true
+    if [[ "$version" != "$(get_current_version)" || "$variant" != "$(get_current_asset_variant)" ||
+          ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "unknown"
+        return
+    fi
+    # The official installer does not update our metadata when replacing a binary.
+    if ! actual_hash=$(sha256_file "${INSTALL_DIR}/cli-proxy-api" 2>/dev/null) ||
+        [[ "$actual_hash" != "${expected_hash,,}" ]]; then
+        echo "unknown"
+        return
+    fi
+    echo "$source"
+}
+
 # Get current version directory
 get_current_version_dir() {
     local current_version
@@ -763,6 +786,18 @@ download_file() {
     log_success "Download completed"
 }
 
+sha256_file() {
+    local digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest=$(sha256sum < "$1") || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        digest=$(shasum -a 256 < "$1") || return 1
+    else
+        return 1
+    fi
+    printf '%s\n' "${digest%% *}"
+}
+
 # Verify the exact release asset before stopping the installed service.
 verify_archive() {
     local archive="$1"
@@ -778,12 +813,7 @@ verify_archive() {
         return 1
     fi
 
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual_hash=$(sha256sum < "$archive")
-    else
-        actual_hash=$(shasum -a 256 < "$archive")
-    fi
-    actual_hash="${actual_hash%% *}"
+    actual_hash=$(sha256_file "$archive")
     if [[ "${actual_hash,,}" != "${expected_hash,,}" ]]; then
         log_error "SHA-256 checksum mismatch for $asset_filename"
         return 1
@@ -831,6 +861,15 @@ write_asset_variant_file() {
     log_success "Release asset variant $asset_variant written to asset-variant.txt"
 }
 
+write_release_source() {
+    local version="$1"
+    local variant="$2"
+    local binary_hash
+    binary_hash=$(sha256_file "${INSTALL_DIR}/cli-proxy-api")
+    printf '%s|%s|%s|%s\n' "${REPO_OWNER}/${REPO_NAME}" "$version" "$variant" "$binary_hash" \
+        > "${INSTALL_DIR}/release-source.txt"
+}
+
 # Clean up old versions (keep last 2 versions)
 cleanup_old_versions() {
     local current_version="$1"
@@ -873,11 +912,15 @@ install_cliproxyapi() {
     current_version=$(get_current_version)
     local current_asset_variant
     current_asset_variant=$(get_current_asset_variant)
+    local current_source
+    current_source=$(get_current_source)
+    local target_source="${REPO_OWNER}/${REPO_NAME}"
     local is_upgrade=false
     local service_was_running=false
 
     if [[ "$current_version" != "none" ]]; then
         log_info "Current CLIProxyAPI version: $current_version"
+        log_info "Current release source: $current_source"
         is_upgrade=true
 
         # Check if service is running before upgrade
@@ -891,6 +934,7 @@ install_cliproxyapi() {
 
     # Check dependencies
     check_dependencies
+    log_step "Selected release source: $target_source"
 
     # Detect Linux architecture
     local os_arch
@@ -919,7 +963,8 @@ install_cliproxyapi() {
     log_step "Release asset: $asset_filename"
 
     # Check if already up to date
-    if [[ "$is_upgrade" == true && "$current_version" == "$version" && "$current_asset_variant" == "$asset_variant" ]]; then
+    if [[ "$is_upgrade" == true && "$current_version" == "$version" &&
+          "$current_asset_variant" == "$asset_variant" && "$current_source" == "$target_source" ]]; then
         log_success "CLIProxyAPI is already up to date (version $version)"
         return
     fi
@@ -978,6 +1023,7 @@ install_cliproxyapi() {
 
     # Write release asset variant file
     write_asset_variant_file "$INSTALL_DIR" "$asset_variant"
+    write_release_source "$version" "$asset_variant"
 
     # Clean up old versions
     cleanup_old_versions "$version"
@@ -1033,6 +1079,7 @@ show_status() {
     echo "=============================="
     echo "Install Directory: $INSTALL_DIR"
     echo "Current Version: $current_version"
+    echo "Current Source: $(get_current_source)"
 
     if [[ "$current_version" != "none" ]]; then
         local current_version_dir
@@ -1119,7 +1166,31 @@ cleanup() {
 
 # Main script logic
 main() {
-    case "${1:-install}" in
+    local command="${1:-install}"
+    if [[ $# -gt 0 ]]; then
+        shift
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "--source")
+                case "${2:-}" in
+                    "fork") REPO_OWNER="JayConstruct" ;;
+                    "official") REPO_OWNER="router-for-me" ;;
+                    *)
+                        log_error "Use --source fork or --source official"
+                        return 1
+                        ;;
+                esac
+                API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+                shift 2
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                return 1
+                ;;
+        esac
+    done
+    case "$command" in
         "install"|"upgrade")
             install_cliproxyapi
             ;;
@@ -1202,6 +1273,9 @@ Commands:
   uninstall          Remove CLIProxyAPI completely
   -h, --help         Show this help message
 
+Options:
+  --source fork|official    Release source for install/upgrade (default: fork)
+
 Description:
   This Linux-specific script installs, upgrades, or removes CLIProxyAPI.
   It can be run from anywhere and automatically detects your Linux architecture.
@@ -1225,6 +1299,8 @@ Supported Platforms:
 
 Examples:
   $SCRIPT_NAME              # Install or upgrade
+  $SCRIPT_NAME upgrade --source official # Switch to the latest official release
+  $SCRIPT_NAME upgrade --source fork     # Switch back to the latest fork release
   $SCRIPT_NAME status       # Show current status
   $SCRIPT_NAME auth         # Show authentication info
   $SCRIPT_NAME check-config # Check configuration
@@ -1234,7 +1310,7 @@ Examples:
 EOF
             ;;
         *)
-            log_error "Unknown command: $1"
+            log_error "Unknown command: $command"
             echo "Use '$SCRIPT_NAME --help' for usage information"
             exit 1
             ;;

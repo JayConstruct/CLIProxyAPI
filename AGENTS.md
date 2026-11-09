@@ -8,6 +8,7 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Fork release preference
 - For future releases of `JayConstruct/CLIProxyAPI`, build only Linux amd64 by default for fast server testing.
 - Publish the standard `linux_amd64.tar.gz` archive with SHA-256 checksums. Build additional platforms or variants only when the user explicitly requests them.
+- Keep fork release tags in `v<upstream-version>-jay.<n>` form so the official installer can distinguish them. Preserve the official installation layout and plain-text version/asset metadata when changing the fork installer.
 
 ## Commands
 ```bash

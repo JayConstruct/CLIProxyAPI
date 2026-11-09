@@ -21,12 +21,12 @@ ASSET = f"CLIProxyAPI_{VERSION}_linux_amd64.tar.gz"
 BINARY = b"#!/bin/sh\nprintf 'test release\\n'\n"
 
 
-def make_archive(include_binary=True):
+def make_archive(include_binary=True, binary=BINARY):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         files = {"config.example.yaml": b"api-keys: []\n"}
         if include_binary:
-            files["cli-proxy-api"] = BINARY
+            files["cli-proxy-api"] = binary
         for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -77,6 +77,9 @@ class InstallerTests(unittest.TestCase):
         (self.install / "asset-variant.txt").write_text("default\n")
         (self.install / "config.yaml").write_text("keep: user configuration\n")
         (self.install / "cli-proxy-api").write_bytes(b"old binary\n")
+        self.auth = self.install / "auths" / "saved-credential.json"
+        self.auth.parent.mkdir()
+        self.auth.write_text('{"keep":"saved credential"}\n')
         self.marker = self.root / "service-events"
         self.temporary = self.root / "temporary"
         self.temporary.mkdir()
@@ -86,16 +89,17 @@ class InstallerTests(unittest.TestCase):
         self.archive = make_archive()
         self.release(self.archive)
 
-    def release(self, payload, checksum=None):
-        self.asset_path = "/release/" + ASSET
-        metadata = {"tag_name": "v" + VERSION, "assets": [
+    def release(self, payload, checksum=None, version=VERSION):
+        asset = f"CLIProxyAPI_{version}_linux_amd64.tar.gz"
+        self.asset_path = "/release/" + asset
+        metadata = {"tag_name": "v" + version, "assets": [
             {"browser_download_url": self.base + self.asset_path}
         ]}
         self.routes["/latest"] = [(200, json.dumps(metadata).encode())]
         self.routes[self.asset_path] = [(200, payload)]
         checksum = checksum or hashlib.sha256(payload).hexdigest()
         self.routes["/release/checksums.txt"] = [
-            (200, f"{checksum}  {ASSET}\n".encode())
+            (200, f"{checksum}  {asset}\n".encode())
         ]
 
     def bash(self, code, *args, env=None):
@@ -105,7 +109,7 @@ class InstallerTests(unittest.TestCase):
             env=env or self.env, capture_output=True, text=True, timeout=30,
         )
 
-    def upgrade(self, env=None):
+    def upgrade(self, env=None, source=""):
         return self.bash('''
 INSTALL_DIR="$1"
 API_URL="$2/latest"
@@ -119,8 +123,14 @@ stop_service() { echo stopped >> "$service_events"; }
 stop_cliproxyapi_processes() { echo killed >> "$service_events"; }
 restart_service() { echo restarted >> "$service_events"; }
 create_systemd_service() { :; }
-main upgrade
-''', self.install, self.base, self.marker, env=env)
+if [[ -n "$4" ]]; then
+    fixture_base="$2"
+    fetch_release_info() { curl -fsSL "$fixture_base/latest"; }
+    main upgrade --source "$4"
+else
+    main upgrade
+fi
+''', self.install, self.base, self.marker, source, env=env)
 
     def assert_preserved(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -128,6 +138,7 @@ main upgrade
         self.assertEqual((self.install / "version.txt").read_text(), "8.0.61-jay.1\n")
         self.assertEqual((self.install / "cli-proxy-api").read_bytes(), b"old binary\n")
         self.assertEqual((self.install / "config.yaml").read_text(), "keep: user configuration\n")
+        self.assertEqual(self.auth.read_text(), '{"keep":"saved credential"}\n')
         self.assertEqual(list(self.temporary.iterdir()), [self.sentinel])
 
     def test_default_repository(self):
@@ -147,6 +158,86 @@ main upgrade
         for path in ("/latest", self.asset_path, "/release/checksums.txt"):
             self.assertEqual(self.requests[path], 2)
         self.assertEqual(list(self.temporary.iterdir()), [self.sentinel])
+
+    def test_source_options_select_repository(self):
+        for source, owner in (("official", "router-for-me"), ("fork", "JayConstruct")):
+            with self.subTest(source=source):
+                result = self.bash('''
+install_cliproxyapi() { printf '%s' "$API_URL"; }
+main upgrade --source "$1"
+''', source)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout,
+                                 f"https://api.github.com/repos/{owner}/CLIProxyAPI/releases/latest")
+
+    def test_invalid_source_does_not_stop_service(self):
+        result = self.upgrade(source="invalid")
+        self.assert_preserved(result)
+        self.assertIn("Use --source fork or --source official", result.stderr)
+
+    def test_switch_to_official_and_back(self):
+        official_binary = b"#!/bin/sh\necho official\n"
+        self.release(make_archive(binary=official_binary), version="8.0.62")
+        result = self.upgrade(source="official")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.install / "version.txt").read_text(), "8.0.62\n")
+        self.assertEqual((self.install / "cli-proxy-api").read_bytes(), official_binary)
+        self.assertTrue((self.install / "release-source.txt").read_text().startswith(
+            "router-for-me/CLIProxyAPI|8.0.62|default|"))
+        # Returning to an older fork release is also an intentional source switch.
+        self.release(self.archive, version="8.0.61-jay.1")
+        result = self.upgrade(source="fork")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.install / "version.txt").read_text(), "8.0.61-jay.1\n")
+        self.assertEqual((self.install / "cli-proxy-api").read_bytes(), BINARY)
+        self.assertTrue((self.install / "release-source.txt").read_text().startswith(
+            "JayConstruct/CLIProxyAPI|8.0.61-jay.1|default|"))
+        self.assertEqual((self.install / "config.yaml").read_text(), "keep: user configuration\n")
+        self.assertEqual(self.auth.read_text(), '{"keep":"saved credential"}\n')
+        self.assertEqual(self.marker.read_text().splitlines(),
+                         ["stopped", "restarted", "stopped", "restarted"])
+
+    def test_legacy_official_install_is_adopted(self):
+        (self.install / "version.txt").write_text("8.0.61\n")
+        (self.install / "asset-variant.txt").unlink()
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.install / "version.txt").read_text(), VERSION + "\n")
+        self.assertEqual((self.install / "config.yaml").read_text(), "keep: user configuration\n")
+        self.assertEqual(self.auth.read_text(), '{"keep":"saved credential"}\n')
+
+    def test_same_version_from_other_source_is_installed(self):
+        (self.install / "version.txt").write_text(VERSION + "\n")
+        digest = hashlib.sha256(b"old binary\n").hexdigest()
+        (self.install / "release-source.txt").write_text(
+            f"router-for-me/CLIProxyAPI|{VERSION}|default|{digest}\n")
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.install / "cli-proxy-api").read_bytes(), BINARY)
+        self.assertEqual(self.marker.read_text().splitlines(), ["stopped", "restarted"])
+
+    def test_official_installer_can_replace_tracked_binary(self):
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # An external installer replaces the binary without updating our source record.
+        (self.install / "cli-proxy-api").write_bytes(b"official replacement\n")
+        result = self.bash('INSTALL_DIR="$1"\nget_current_source', self.install)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "unknown")
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.install / "cli-proxy-api").read_bytes(), BINARY)
+
+    def test_current_source_and_binary_skip_reinstall(self):
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        requests_before = self.requests[self.asset_path]
+        events_before = self.marker.read_text()
+        result = self.upgrade()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("already up to date", result.stdout)
+        self.assertEqual(self.requests[self.asset_path], requests_before)
+        self.assertEqual(self.marker.read_text(), events_before)
 
     def test_http_error_does_not_stop_service(self):
         self.routes[self.asset_path] = [(404, b"<html>Not Found</html>")]
