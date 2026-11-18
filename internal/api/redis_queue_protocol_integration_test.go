@@ -691,8 +691,9 @@ func TestRedisProtocol_MalformedAndOverflowFramesDoNotCrashServer(t *testing.T) 
 	t.Cleanup(stop)
 
 	frames := []struct {
-		name  string
-		bytes []byte
+		name       string
+		bytes      []byte
+		closeWrite bool
 	}{
 		{
 			name:  "bulk length int64 overflow",
@@ -707,8 +708,9 @@ func TestRedisProtocol_MalformedAndOverflowFramesDoNotCrashServer(t *testing.T) 
 			bytes: []byte("*1\r\n$1073741824\r\n"),
 		},
 		{
-			name:  "unbounded line without CRLF",
-			bytes: append([]byte("*1\r\n+"), bytes.Repeat([]byte("A"), maxRESPLineLen+8192)...),
+			name:       "oversized line without CRLF",
+			bytes:      append([]byte("*1\r\n+"), bytes.Repeat([]byte("A"), maxRESPLineLen+3)...),
+			closeWrite: true,
 		},
 	}
 
@@ -730,6 +732,12 @@ func TestRedisProtocol_MalformedAndOverflowFramesDoNotCrashServer(t *testing.T) 
 			if _, errWrite := conn.Write(tc.bytes); errWrite != nil && !errors.Is(errWrite, net.ErrClosed) {
 				// For oversized frames the server may reject and close before all bytes are written.
 				t.Logf("write returned early after server rejection: %v", errWrite)
+			}
+			if tc.closeWrite {
+				// Let the server read the final fragment without leaving unread TCP data.
+				if errCloseWrite := conn.(*net.TCPConn).CloseWrite(); errCloseWrite != nil {
+					t.Fatalf("failed to close write side: %v", errCloseWrite)
+				}
 			}
 
 			msg, errRead := readTestRESPError(bufio.NewReader(conn))

@@ -36,9 +36,9 @@ func newShutdownTestServer(t *testing.T) *shutdownTestFixture {
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	if errClose := ln.Close(); errClose != nil {
-		t.Fatalf("failed to close probe listener: %v", errClose)
-	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
 	addr := ln.Addr().String()
 
 	cfg := &config.Config{Host: "127.0.0.1", Port: ln.Addr().(*net.TCPAddr).Port}
@@ -60,12 +60,8 @@ func newShutdownTestServer(t *testing.T) *shutdownTestFixture {
 	})
 	server.server.Handler = engine
 
-	serveLn, errListen := net.Listen("tcp", addr)
-	if errListen != nil {
-		t.Fatalf("failed to re-listen on %s: %v", addr, errListen)
-	}
 	go func() {
-		_ = server.server.Serve(serveLn)
+		_ = server.server.Serve(ln)
 	}()
 	fx := &shutdownTestFixture{
 		server:     server,
@@ -76,7 +72,6 @@ func newShutdownTestServer(t *testing.T) *shutdownTestFixture {
 	t.Cleanup(func() {
 		fx.releaseHandler()
 		_ = server.server.Close()
-		_ = serveLn.Close()
 	})
 
 	return fx
